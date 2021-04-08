@@ -34,7 +34,7 @@ node {
         module_artifactId = pom.artifactId
         module_version = pom.parent.version
         k8s_label = mvn_module
-        docker_host = "47.110.104.50"
+        docker_host = "mydocker-registry.com"
         ding_group_access_token = "faf8e44b7aeb99your-ding-group-token-f3b9676f0224e580c84bddff79013f14a"
         ding_jenkinsUrl = "http://jenkins.ryan-miao.com/view/%E5%BC%80%E5%BA%97%E5%8A%A9%E6%89%8B/"
         //要部署的k8s集群, 默认是杭州(config-hangzhou), 可选上海(config-shanghai)
