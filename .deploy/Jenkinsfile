@@ -1,0 +1,164 @@
+class MyChange {
+    String author;
+    String msg;
+}
+
+@NonCPS
+def getChanges() {
+    def changeLogSets = currentBuild.changeSets
+    for (int i = 0; i < changeLogSets.size(); i++) {
+        def entries = changeLogSets[0].items
+        for (int j = 0; j < entries.length; j++) {
+            def entry = entries[0]
+            def change = new MyChange()
+            change.author = entry.author
+            change.msg = entry.msg
+            return change
+        }
+    }
+
+}
+
+node {
+    properties([gitLabConnection('gitlab-bigdata')])
+
+    stage('Prepare') {
+        echo "1.Prepare Stage"
+        checkout scm
+        updateGitlabCommitStatus name: 'build', state: 'pending'
+        mvn_module = "lego-model-server"
+        module_path = "${mvn_module}"
+        pom = readMavenPom file: "./${module_path}/pom.xml"
+        module_parent = pom.parent.artifactId
+        module_group = pom.parent.groupId
+        module_artifactId = pom.artifactId
+        module_version = pom.parent.version
+        k8s_label = mvn_module
+        docker_host = "47.110.104.50"
+        ding_group_access_token = "faf8e44b7aeb99your-ding-group-token-f3b9676f0224e580c84bddff79013f14a"
+        ding_jenkinsUrl = "http://jenkins.ryan-miao.com/view/%E5%BC%80%E5%BA%97%E5%8A%A9%E6%89%8B/"
+        //要部署的k8s集群, 默认是杭州(config-hangzhou), 可选上海(config-shanghai)
+        //部署环境
+        profile = ""
+        if (env.BRANCH_NAME == 'test') {
+            profile = "test"
+            k8s_cluster_node = "config-ryan-test"
+        }
+        if (env.BRANCH_NAME == 'master') {
+            profile = "prod"
+            k8s_cluster_node = "config-ryan-prod"
+        }
+
+        img_name = "${module_group}/${module_artifactId}"
+        docker_img_name = "${docker_host}/${img_name}"
+        echo "group: ${module_group}, artifactId: ${module_artifactId}, version: ${module_version}"
+        echo "docker-img-name: ${docker_img_name}"
+        script {
+            build_tag = sh(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
+            build_tag = "${env.BRANCH_NAME}-${build_tag}"
+
+            currentBuild.displayName = BUILD_NUMBER + "_" + build_tag
+        }
+    }
+
+    stage('Compile And UnitTest') {
+        echo "2.Compile the code"
+        try {
+            sh "source /etc/profile; mvn clean install"
+        } catch (Exception ex) {
+            updateGitlabCommitStatus name: 'build', state: 'failed'
+            def change = getChanges()
+            dingTalk accessToken: "${ding_group_access_token}", imageUrl: '', jenkinsUrl: "${ding_jenkinsUrl}", message: "@所有人 构建失败@$change.author $change.msg", notifyPeople: "$change.author"
+            throw ex;
+        } finally {
+
+        }
+
+        updateGitlabCommitStatus name: 'build', state: 'success'
+    }
+
+
+    if (env.BRANCH_NAME == 'dev' || env.BRANCH_NAME == 'test' || env.BRANCH_NAME == 'master') {
+
+        echo "发布api"
+        if(module_version.contains('-SNAPSHOT')) {
+            sh "mvn deploy"
+        }
+        if (env.BRANCH_NAME == 'dev') {
+            def remote = [:]
+            remote.name = 'k8s-worker-003'
+            remote.host = '10.0.100.23'
+            remote.user = 'root'
+            remote.password = 'sw@2019'
+            remote.allowAnyHosts = true
+            // bind到机器的端口
+            deploy_nodePort = 31325
+            // springboot内部的端口
+            deploy_serverPort = 31325
+            // deploy dir
+            deploy_dir = "/home/deploy/${module_artifactId}/"
+            stage('Remote SSH') {
+                sshCommand remote: remote, command: "mkdir -p ${deploy_dir}"
+                sshPut remote: remote, from: "${WORKSPACE}/${module_path}/.deploy/service.sh", into: "${deploy_dir}"
+                sshCommand remote: remote, command: "chmod +x ${deploy_dir}service.sh"
+                sshPut remote: remote, from: "${WORKSPACE}/${module_path}/target/${module_artifactId}.jar", into: "${deploy_dir}"
+                sshCommand remote: remote, command: "cd ${deploy_dir}; /bin/bash service.sh ${module_artifactId} restart ${deploy_nodePort} dev"
+            }
+            updateGitlabCommitStatus name: 'deploy', state: 'success'
+        }
+
+        if (env.BRANCH_NAME == 'test' || env.BRANCH_NAME == 'master') {
+            stage('Build Docker Image') {
+                echo "4.Build Docker Image Stage"
+                sh "docker build -t ${docker_img_name}:${build_tag} " +
+                        " --build-arg JAR_FILE=target/${mvn_module}.jar " +
+                        " --build-arg profile=${profile} " +
+                        " -f ${module_path}/.deploy/Dockerfile ./${module_path}"
+            }
+
+            stage('Push Docker Image') {
+                echo "5.Push Docker Image Stage"
+                //sh "mvn deploy -Dmaven.test.skip=true"
+                sh "docker tag ${docker_img_name}:${build_tag} ${docker_img_name}:latest"
+                sh "docker tag ${docker_img_name}:${build_tag} ${docker_img_name}:${pom.version}"
+                withCredentials([usernamePassword(credentialsId: 'docker-register-ryan-miao', passwordVariable: 'dockerPassword', usernameVariable: 'dockerUser')]) {
+                    sh "docker login -u ${dockerUser} -p ${dockerPassword} ${docker_host}"
+                    sh "docker push ${docker_img_name}:latest"
+                    sh "docker push ${docker_img_name}:${pom.version}"
+                    sh "docker push ${docker_img_name}:${build_tag}"
+                }
+            }
+
+            stage("Deploy to k8s - ${profile}") {
+                echo "6. Deploy Stage"
+
+                updateGitlabCommitStatus name: 'deploy', state: 'pending'
+                def k8s_conf_yaml = "${WORKSPACE}/${module_path}/.deploy/${profile}-k8s.yaml"
+                def k8s_cluster_node_conf = "/home/jenkins/.kube/${k8s_cluster_node}"
+
+                sh "sed -i 's!<IMG_NAME>!${img_name}!g;s!<IMG_TAG>!${build_tag}!g;s!<k8s-label>!${k8s_label}!g' ${k8s_conf_yaml} "
+                sh "kubectl --kubeconfig ${k8s_cluster_node_conf} apply -f ${k8s_conf_yaml} --record"
+                sh "sleep 5"
+                echo "创建的实例："
+
+                sh " kubectl --kubeconfig ${k8s_cluster_node_conf} get po -o wide | grep ${k8s_label}"
+                echo "您的应用svc: "
+                sh " kubectl --kubeconfig ${k8s_cluster_node_conf}  get svc | grep ${k8s_label}"
+
+                updateGitlabCommitStatus name: 'deploy', state: 'success'
+                if (profile == "prod") {
+                    dingSuccess()
+                }
+            }
+        }
+    }
+
+
+}
+
+
+private void dingSuccess() {
+    echo "构建成功, 发布生产环境"
+    dingTalk accessToken: "${ding_group_access_token}", imageUrl: '', jenkinsUrl: "${ding_jenkinsUrl}", message: "@所有人 构建成功, 发布生产环境", notifyPeople: ""
+}
+

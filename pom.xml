@@ -19,6 +19,26 @@
         <jacoco.percentage.branch>0.00</jacoco.percentage.branch>
 
     </properties>
+    <repositories>
+
+        <repository>
+            <id>central</id>
+            <url>http://maven.aliyun.com/nexus/content/groups/public/</url>
+            <name>aliyun</name>
+        </repository>
+
+        <repository>
+            <id>maven-central</id>
+            <url>http://repo1.maven.org/maven2/</url>
+            <name>maven</name>
+        </repository>
+
+        <repository>
+            <id>jitpack.io</id>
+            <url>https://jitpack.io</url>
+        </repository>
+
+    </repositories>
 
     <dependencyManagement>
         <dependencies>
