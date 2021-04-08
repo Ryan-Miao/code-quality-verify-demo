@@ -26,7 +26,7 @@ node {
         echo "1.Prepare Stage"
         checkout scm
         updateGitlabCommitStatus name: 'build', state: 'pending'
-        mvn_module = "lego-model-server"
+        mvn_module = "."
         module_path = "${mvn_module}"
         pom = readMavenPom file: "./${module_path}/pom.xml"
         module_parent = pom.parent.artifactId
